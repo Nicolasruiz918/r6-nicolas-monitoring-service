@@ -430,7 +430,9 @@ def _uuid_or_system(value: Any) -> UUID:
 def _serialize(value: Any) -> Any:
     if isinstance(value, Decimal):
         return float(value)
-    if isinstance(value, (UUID, datetime, date)):
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, (datetime, date)):
         return value.isoformat()
     return value
 
