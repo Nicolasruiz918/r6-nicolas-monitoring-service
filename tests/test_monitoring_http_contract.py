@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 from pathlib import Path
 from uuid import UUID
 
@@ -48,14 +49,40 @@ def _token(features: list[str]) -> str:
     return f"Bearer header.{payload}.signature"
 
 
+def _paths(routes) -> set[str]:
+    paths: set[str] = set()
+    for route in routes:
+        if hasattr(route, "path"):
+            paths.add(route.path)
+        elif hasattr(route, "routes"):
+            paths.update(_paths(route.routes))
+        elif hasattr(route, "original_router"):
+            prefix = route.include_context.prefix
+            paths.update(f"{prefix}{path}" for path in _paths(route.original_router.routes))
+    return paths
+
+
 def test_contract_paths_are_registered() -> None:
-    contract = Path(__file__).parents[2] / "design-software-docs" / "07-api" / "contracts" / "openapi" / "monitoring.yaml"
+    workspace = Path(__file__).parents[2]
+    docs_repo = Path(os.environ["MONITORING_DOCS_REPO"]) if os.environ.get("MONITORING_DOCS_REPO") else next(
+        (
+            candidate
+            for candidate in (
+                workspace / "design-software-docs",
+                workspace / "design-software-docs-main",
+                workspace / "r6-nicolas-design-software-docs",
+            )
+            if candidate.exists()
+        ),
+        workspace / "design-software-docs",
+    )
+    contract = docs_repo / "07-api" / "contracts" / "openapi" / "monitoring.yaml"
     expected = {
         f"/api/v1{line.split(':', 1)[0].strip()}"
         for line in contract.read_text(encoding="utf-8").splitlines()
         if line.startswith("  /")
     }
-    registered = {route.path for route in _app().routes}
+    registered = _paths(_app().routes)
 
     assert expected.issubset(registered)
     assert "/api/v1/kpi-trackings" in registered

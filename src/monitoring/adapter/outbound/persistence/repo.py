@@ -21,6 +21,7 @@ from sqlalchemy import (
     create_engine,
     insert,
     select,
+    text,
     update,
 )
 from sqlalchemy.engine import Engine
@@ -146,7 +147,7 @@ tracking_session = Table(
 improvement_plan = Table(
     "improvement_plan",
     metadata,
-    Column("id", Uuid(as_uuid=True), primary_key=True),
+    Column("id", Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")),
     Column("ficha_tracking_id", Uuid(as_uuid=True), ForeignKey("monitoring.ficha_tracking.id"), nullable=False),
     Column("generated_alert_id", Uuid(as_uuid=True)),
     Column("learner_id", Uuid(as_uuid=True)),

@@ -24,6 +24,12 @@ from monitoring.adapter.outbound.persistence.repo import (
     risk_level,
     tracking_session,
 )
+from monitoring.adapter.outbound.persistence.specific_actions_compat import (
+    decode_specific_actions,
+    dual_write_v2,
+    jsonb_value,
+    uses_jsonb_contract,
+)
 from monitoring.application.port.inbound.record_kpi import RecordKpiUseCase
 
 SessionFactory = Callable[[], Session]
@@ -337,7 +343,10 @@ def build_router(use_case: RecordKpiUseCase | None, repository: Any | None = Non
         values.update(status="PENDING", created_by=_uuid_or_system(claims.get("sub")), created_at=now, updated_at=now)
         try:
             with sf() as session, session.begin():
+                if uses_jsonb_contract(session):
+                    values["specific_actions"] = jsonb_value(body.specific_actions)
                 row = session.execute(insert(improvement_plan).values(**values).returning(improvement_plan)).one()
+                dual_write_v2(session, row._mapping["id"], body.specific_actions)
                 return _row(row)
         except SQLAlchemyError as exc:
             raise _http_error(400, "BAD_REQUEST", "Could not create improvement plan") from exc
@@ -357,8 +366,13 @@ def build_router(use_case: RecordKpiUseCase | None, repository: Any | None = Non
             requested_status = values.get("status")
             if requested_status and requested_status != current_row["status"] and requested_status not in VALID_PLAN_TRANSITIONS[current_row["status"]]:
                 raise _http_error(409, "INVALID_STATE_TRANSITION", "Invalid improvement plan transition")
+            raw_specific_actions = values.get("specific_actions")
+            if raw_specific_actions is not None and uses_jsonb_contract(session):
+                values["specific_actions"] = jsonb_value(raw_specific_actions)
             values["updated_at"] = datetime.now(timezone.utc)
             row = session.execute(update(improvement_plan).where(improvement_plan.c.id == id).values(**values).returning(improvement_plan)).one()
+            if raw_specific_actions is not None:
+                dual_write_v2(session, id, raw_specific_actions)
             return _row(row)
 
     @router.get("/reports/kpi-summary")
@@ -430,7 +444,9 @@ def _uuid_or_system(value: Any) -> UUID:
 def _serialize(value: Any) -> Any:
     if isinstance(value, Decimal):
         return float(value)
-    if isinstance(value, (UUID, datetime, date)):
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, (datetime, date)):
         return value.isoformat()
     return value
 
@@ -441,7 +457,10 @@ def _row(row: Any) -> dict[str, Any]:
         first = next(iter(mapping.values()))
         if hasattr(first, "_mapping"):
             mapping = first._mapping
-    return {key: _serialize(value) for key, value in mapping.items()}
+    result = {key: _serialize(value) for key, value in mapping.items()}
+    if "specific_actions" in result:
+        result["specific_actions"] = decode_specific_actions(result["specific_actions"])
+    return result
 
 
 def _page(sf: SessionFactory, stmt: Select[Any], page: int, page_size: int) -> dict[str, Any]:
