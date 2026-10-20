@@ -64,7 +64,7 @@ def test_r6_expand_backfill_contract_and_rollbacks(database) -> None:
     connection.execute("INSERT INTO monitoring.improvement_plan VALUES ('00000000-0000-0000-0000-000000000002', %s)", ("Plan nuevo",))
     connection.execute(sql_file(ALTER / "r6_backfill_specific_actions_v2.sql"))
     assert connection.execute("SELECT count(*) FROM monitoring.improvement_plan WHERE specific_actions_v2 IS NOT NULL").fetchone()[0] == 2
-    assert connection.execute("SELECT count(*) FROM monitoring.improvement_plan WHERE specific_actions_v2->'actions'->0->>'text' <> specific_actions").fetchone()[0] == 0
+    assert connection.execute("SELECT count(*) FROM monitoring.improvement_plan WHERE specific_actions_v2 IS NULL OR (specific_actions_v2->'actions'->0->>'text') IS DISTINCT FROM specific_actions").fetchone()[0] == 0
 
     # A second connection can still read while the compatible writes run.
     with psycopg.connect(DATABASE_URL) as continuity:

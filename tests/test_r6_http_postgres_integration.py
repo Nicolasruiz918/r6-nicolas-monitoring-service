@@ -107,16 +107,29 @@ def http_database():
 
     yield engine, tracking_id
 
-    with engine.begin() as connection:
-        data_type = connection.execute(
-            text("SELECT data_type FROM information_schema.columns WHERE table_schema='monitoring' AND table_name='improvement_plan' AND column_name='specific_actions'")
-        ).scalar_one()
-        has_v2 = connection.execute(
-            text("SELECT count(*) FROM information_schema.columns WHERE table_schema='monitoring' AND table_name='improvement_plan' AND column_name='specific_actions_v2'")
-        ).scalar_one()
-        if data_type == "text" and has_v2:
-            _run_sql(connection, ALTER / "r6_contract_specific_actions_v2.sql")
-    engine.dispose()
+    cleanup_error = None
+    try:
+        with engine.begin() as connection:
+            data_type = connection.execute(
+                text("SELECT data_type FROM information_schema.columns WHERE table_schema='monitoring' AND table_name='improvement_plan' AND column_name='specific_actions'")
+            ).scalar_one()
+            has_v2 = connection.execute(
+                text("SELECT count(*) FROM information_schema.columns WHERE table_schema='monitoring' AND table_name='improvement_plan' AND column_name='specific_actions_v2'")
+            ).scalar_one()
+            if data_type == "jsonb":
+                _run_sql(connection, ROLLBACK / "r6_contract_specific_actions_v2.rollback.sql")
+                data_type, has_v2 = "text", 1
+            if data_type == "text" and has_v2:
+                mismatch = connection.execute(
+                    text("SELECT count(*) FROM monitoring.improvement_plan WHERE specific_actions_v2 IS NULL OR (specific_actions_v2->'actions'->0->>'text') IS DISTINCT FROM specific_actions")
+                ).scalar_one()
+                _run_sql(connection, ROLLBACK / "r6_expand_specific_actions_v2.rollback.sql")
+                if mismatch:
+                    cleanup_error = f"HTTP test left {mismatch} inconsistent transitional rows; removed only the disposable v2 column"
+    finally:
+        engine.dispose()
+    if cleanup_error:
+        pytest.fail(cleanup_error)
 
 
 def test_r6_http_crud_during_transition_and_after_contract(http_database) -> None:
@@ -148,6 +161,14 @@ def test_r6_http_crud_during_transition_and_after_contract(http_database) -> Non
     created = client.post("/api/v1/improvement-plans", headers=headers, json=transitional)
     assert created.status_code == 201, created.text
     plan_id = created.json()["id"]
+    with engine.begin() as connection:
+        transitional_row = connection.execute(
+            text("SELECT specific_actions, specific_actions_v2->'actions'->0->>'text' FROM monitoring.improvement_plan WHERE id=:id"),
+            {"id": plan_id},
+        ).one()
+        assert transitional_row[0] == transitional["specific_actions"]
+        assert transitional_row[1] == transitional["specific_actions"]
+
     updated = client.put(
         f"/api/v1/improvement-plans/{plan_id}",
         headers=headers,
@@ -155,6 +176,13 @@ def test_r6_http_crud_during_transition_and_after_contract(http_database) -> Non
     )
     assert updated.status_code == 200, updated.text
     assert updated.json()["specific_actions"] == "Acción actualizada ✅"
+    with engine.begin() as connection:
+        updated_row = connection.execute(
+            text("SELECT specific_actions, specific_actions_v2->'actions'->0->>'text' FROM monitoring.improvement_plan WHERE id=:id"),
+            {"id": plan_id},
+        ).one()
+        assert updated_row[0] == "Acción actualizada ✅"
+        assert updated_row[1] == "Acción actualizada ✅"
 
     listed = client.get("/api/v1/improvement-plans", headers=headers).json()
     assert listed["pagination"]["total"] >= 2
@@ -162,7 +190,7 @@ def test_r6_http_crud_during_transition_and_after_contract(http_database) -> Non
 
     with engine.begin() as connection:
         mismatch = connection.execute(
-            text("SELECT count(*) FROM monitoring.improvement_plan WHERE specific_actions_v2->'actions'->0->>'text' <> specific_actions")
+            text("SELECT count(*) FROM monitoring.improvement_plan WHERE specific_actions_v2 IS NULL OR (specific_actions_v2->'actions'->0->>'text') IS DISTINCT FROM specific_actions")
         ).scalar_one()
         assert mismatch == 0
         _run_sql(connection, ALTER / "r6_contract_specific_actions_v2.sql")
